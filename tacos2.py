@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-#   Copyright 2015 Jonas Berg
+#   Copyright 2017 Kazuhiro Matsuda
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -83,8 +83,8 @@ DLE = 0x10
 STX= 0x02
 ETX= 0x03
 STOP = 0x84
-READ = 0x8E
 SET = 0x8F
+GET = 0x55
 
 ##############################
 ## Tacos2 instrument object ##
@@ -131,6 +131,15 @@ class Instrument():
         self.sa = sourceaddress
         """source address (1 byte) """
 
+	self.height = 0;
+        """ blind hight from floor"""
+
+        self.angle = 0;
+        """ slat angle """
+
+        self.slaveAddress = 0x01
+        """ client address """
+
         self.debug = False
         """Set this to :const:`True` to print the communication details. Defaults to :const:`False`."""
 
@@ -173,8 +182,6 @@ class Instrument():
     ######################################
     ## Methods for talking to the slave ##
     ######################################
-
-
     def stop(self, das, dae):
         """stop Blind control.
 
@@ -193,7 +200,7 @@ class Instrument():
 
         """
 
-        cw = 0x0C
+        cw = 0xC0
 	cmd = STOP
 	_checkAddress(das, dae)
         return self._genericCommand(das, dae, cw, cmd)
@@ -214,13 +221,13 @@ class Instrument():
 
         """
 
-        cw = 0x0C
+        cw = 0xC0
 	cmd = SET 
         _checkAddress(das, dae)
         return self._genericCommand(das, dae, cw, cmd, height=height, angle=angle)
 
 
-    def read(self, das):
+    def get(self, das):
         """Read blind's height and slat angle.
 
         Args:
@@ -234,13 +241,131 @@ class Instrument():
 
         """
 
-        cw = 0x0C
-	cmd = READ
+        cw = 0x60
+	cmd = GET
 	dae = das
         _checkAddress(das)
         return self._genericCommand(das, dae, cw, cmd)
 
+    def setSlaveAddress(self, address):
+        """ set slave address """
 
+        if address > 0 or address <= 255:
+            self.slaveAddress = address
+        else:
+            raise ValueError(address)
+
+    def _receive(self):
+        """ receive payload from master and respond
+
+        Args:
+            None
+
+        Returns:
+            Received payload
+
+        Raises:
+            ValueError
+        """
+
+        payloadFromMaster = []
+        pos = 0
+        payloadFromMaster += [self.serial.read()]
+
+        while payloadFromMaster[pos] != chr(ETX):
+            pos += 1
+            payloadFromMaster += [self.serial.read()]
+
+        pos += 1
+        payloadFromMaster += [self.serial.read()]
+
+        return payloadFromMaster
+
+    def respond(self):
+        """ analyze payload from master
+        Args:
+            None
+        Raises:
+            ValueError
+        """
+        payloadFromMaster = self._receive()
+
+        pos = 2
+
+        if payloadFromMaster[pos] == chr(DLE):
+            pos += 1
+
+        bytecount = payloadFromMaster[pos]
+        pos += 1
+
+        if payloadFromMaster[pos] == chr(DLE):
+            pos += 1
+
+        das = payloadFromMaster[pos]
+        pos += 1
+
+        if payloadFromMaster[pos] == chr(DLE):
+            pos += 1
+
+        dae = payloadFromMaster[pos]
+        pos += 1
+
+        cw = payloadFromMaster[pos]
+
+        if payloadFromMaster[pos] == chr(DLE):
+            pos += 1
+
+        sax = payloadFromMaster[pos]
+        pos += 1
+
+        if payloadFromMaster[pos] == chr(DLE):
+            pos += 1
+
+        sa = payloadFromMaster[pos]
+        pos += 1
+
+        cmd = payloadFromMaster[pos]
+        pos += 1
+
+        if cmd in (chr(STOP), chr(GET)):
+            pos += 3
+            fcc = payloadFromMaster[pos]    
+        elif cmd == chr(SET):
+            pos += 1
+            if payloadFromMaster[pos] == chr(DLE):
+                pos += 1
+
+            if ord(payloadFromMaster[pos]) != 255:
+                self.height = payloadFromMaster[pos]
+            pos += 1
+
+            if payloadFromMaster[pos] == chr(DLE):
+                pos += 1
+
+            if ord(payloadFromMaster[pos]) != 255: 
+                self.angle = payloadFromMaster[pos]
+            pos += 3
+
+            fcc = payloadFromMaster[pos] 
+
+        if cmd == chr(GET) and (self.slaveAddress == das and self.slabveAddress == dae):
+            cw = 0x00
+            _sendResponse(cw)
+
+    def _sendResponse(self, cw):
+        if cw == 0x00:
+            payloadToMaster = checkEsc(self.sa) + checkEsc(self.sa) + checkEsc(cw) + chr(0xFF) \
+                + checkEsc(self.slaveAddress) \
+                + checkEsc(self.height) + checkEsc(self.angle) \
+                + chr(DLE) + chr(ETX)
+
+        bc = len(payloadToMaster)
+        payloadToMaster = chr(bc) + payloadToMaster
+        payloadToMaster += _calculateFcc(payloadToSlave)
+        payloadToMaster = chr(DLE) + chr(STX) + payloadToMaster
+
+        self.serial.write(payloadToMaster)
+            
     #####################
     ## Generic command ##
     #####################
@@ -257,7 +382,7 @@ class Instrument():
 
         Returns:
 	    * STOP: OK or NG
-	    * READ: blind address, height and angle.
+	    * GET: blind address, height and angle.
 	    * SET: OK or NG
 
         Raises:
@@ -266,13 +391,15 @@ class Instrument():
         """
 
         ## Build payload to slave ##
-        if cmd == STOP or cmd == READ:
-            payloadToSlave = _checkEsc(das) + _checkEsc(dae) + _checkEsc(cw) + _checkEsc(self.sax) + _checkEsc(self.sa) + \
-				chr(cmd) + chr(DLE) + chr(ETX)
+        if cmd in (STOP, GET):
+            payloadToSlave = _checkEsc(das) + _checkEsc(dae) + _checkEsc(cw) + \
+                             _checkEsc(self.sax) + _checkEsc(self.sa) + \
+		 	     chr(cmd) + chr(DLE) + chr(ETX)
 
         elif cmd == SET:
-	    payloadToSlave = _checkEsc(das) + _checkEsc(dae) + _checkEsc(cw) + _checkEsc(self.sax) + _checkEsc(self.sa) + \
-                                chr(cmd) + _checkEsc(height) + _checkEsc(angle) + chr(DLE) + chr(ETX)
+	    payloadToSlave = _checkEsc(das) + _checkEsc(dae) + _checkEsc(cw) + \
+                             _checkEsc(self.sax) + _checkEsc(self.sa) + \
+                             chr(cmd) + _checkEsc(height) + _checkEsc(angle) + chr(DLE) + chr(ETX)
 
 	bc = _checkEsc(len(payloadToSlave))
 
@@ -286,11 +413,8 @@ class Instrument():
         payloadFromSlave = self._performCommand(payloadToSlave)
 
         ## Check the contents in the response payload ##
-        if cmd == STOP or cmd == SET:
-            return _checkResponse(payloadFromSlave)  # OK or NG 
-
-        if cmd == READ:
-            return _checkResponseRead(payloadFromSlave)  # blind address, height and angle 
+        if cmd == GET:
+            return _checkResponse(payloadFromSlave)  # blind address, height and angle 
 
     ##########################################
     ## Communication implementation details ##
@@ -444,11 +568,6 @@ class Instrument():
                 (_LATEST_READ_TIMES.get(self.serial.port, 0) - latest_write_time) * _SECONDS_TO_MILLISECONDS,
                 self.serial.timeout * _SECONDS_TO_MILLISECONDS)
             _print_out(text)
-
-
-####
-        answer = chr(DLE) + chr(STX) + chr(8) + chr(1) + chr(6) +chr(0x0C) + chr(0x00) + chr(0x00) + chr(0x8F) + chr(DLE) + chr(ETX) + chr(0x66)
-###
 
         if len(answer) == 0:
             raise IOError('No communication with the instrument (no answer)')
@@ -801,10 +920,59 @@ def _calculateFcc(payload):
 def _checkResponse(response):
     """ check response 
     """
+    pos = 2
 
-    return True
+    if response[pos] == chr(DLE):
+        pos += 1
 
-def _checkResponseRead(response):
-    """ check response related to READ
-    """
-    return True
+        bytecount = response[pos]
+        pos += 1
+
+        if response[pos] == chr(DLE):
+            pos += 1
+
+        das = response[pos]
+        pos += 1
+
+        if response[pos] == chr(DLE):
+            pos += 1
+
+        dae = response[pos]
+        pos += 1
+
+        cw = response[pos]
+
+        if response[pos] == chr(DLE):
+            pos += 1
+
+        sax = response[pos]
+        pos += 1
+
+        if response[pos] == chr(DLE):
+            pos += 1
+
+        sa = response[pos]
+        pos += 1
+
+        res = response[pos]
+        pos += 1
+
+        if res == chr(GET):
+            pos += 1
+            if response[pos] == chr(DLE):
+                pos += 1
+
+            if ord(response[pos]) != 255:
+                self.height = response[pos]
+            pos += 1
+
+            if response[pos] == chr(DLE):
+                pos += 1
+
+            if ord(response[pos]) != 255:
+                self.angle = response[pos]
+            pos += 3
+
+            fcc = response[pos]
+
+    return self.height, self.angle 
