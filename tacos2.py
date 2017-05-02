@@ -822,6 +822,80 @@ def _checkNumerical(inputvalue, minvalue=None, maxvalue=None, description='input
                 description, inputvalue, maxvalue))
 
 
+def _checkString(inputstring, description, minlength=0, maxlength=None):
+    """Check that the given string is valid.
+
+    Args:
+        * inputstring (string): The string to be checked
+        * description (string): Used in error messages for the checked inputstring
+        * minlength (int): Minimum length of the string
+        * maxlength (int or None): Maximum length of the string
+
+    Raises:
+        TypeError, ValueError
+
+    Uses the function :func:`_checkInt` internally.
+
+    """
+    # Type checking
+    if not isinstance(description, str):
+        raise TypeError('The description should be a string. Given: {0!r}'.format(description))
+
+    if not isinstance(inputstring, str):
+        raise TypeError('The {0} should be a string. Given: {1!r}'.format(description, inputstring))
+
+    if not isinstance(maxlength, (int, type(None))):
+        raise TypeError('The maxlength must be an integer or None. Given: {0!r}'.format(maxlength))
+
+    # Check values
+    _checkInt(minlength, minvalue=0, maxvalue=None, description='minlength')
+
+    if len(inputstring) < minlength:
+        raise ValueError('The {0} is too short: {1}, but minimum value is {2}. Given: {3!r}'.format( \
+            description, len(inputstring), minlength, inputstring))
+
+    if not maxlength is None:
+        if maxlength < 0:
+            raise ValueError('The maxlength must be positive. Given: {0}'.format(maxlength))
+
+        if maxlength < minlength:
+            raise ValueError('The maxlength must not be smaller than minlength. Given: {0} and {1}'.format( \
+                maxlength, minlength))
+
+        if len(inputstring) > maxlength:
+            raise ValueError('The {0} is too long: {1}, but maximum value is {2}. Given: {3!r}'.format( \
+                description, len(inputstring), maxlength, inputstring))
+
+def _checkInt(inputvalue, minvalue=None, maxvalue=None, description='inputvalue'):
+    """Check that the given integer is valid.
+
+    Args:
+        * inputvalue (int or long): The integer to be checked
+        * minvalue (int or long, or None): Minimum value of the integer
+        * maxvalue (int or long, or None): Maximum value of the integer
+        * description (string): Used in error messages for the checked inputvalue
+
+    Raises:
+        TypeError, ValueError
+
+    Note: Can not use the function :func:`_checkString`, as that function uses this function internally.
+
+    """
+    if not isinstance(description, str):
+        raise TypeError('The description should be a string. Given: {0!r}'.format(description))
+
+    if not isinstance(inputvalue, (int, long)):
+        raise TypeError('The {0} must be an integer. Given: {1!r}'.format(description, inputvalue))
+
+    if not isinstance(minvalue, (int, long, type(None))):
+        raise TypeError('The minvalue must be an integer or None. Given: {0!r}'.format(minvalue))
+
+    if not isinstance(maxvalue, (int, long, type(None))):
+        raise TypeError('The maxvalue must be an integer or None. Given: {0!r}'.format(maxvalue))
+
+    _checkNumerical(inputvalue, minvalue, maxvalue, description)
+
+
 #####################
 # Development tools #
 #####################
