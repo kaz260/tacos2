@@ -4,7 +4,6 @@ HISTORY.rst
 LICENSE
 MANIFEST.in
 README.rst
-dummy_serial.py
 setup.cfg
 setup.py
 tacos2.py

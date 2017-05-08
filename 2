@@ -69,7 +69,7 @@ BYTESIZE = 8
 STOPBITS = 1
 """Default value for the number of stopbits (int)."""
 
-TIMEOUT  = 0.1
+TIMEOUT  = 0.05
 """Default value for the timeout value in seconds (float)."""
 
 CLOSE_PORT_AFTER_EACH_CALL = False
@@ -270,18 +270,14 @@ class Instrument():
 
         payloadFromMaster = []
         pos = 0
-
         payloadFromMaster += [self.serial.read()]
 
         while payloadFromMaster[pos] != chr(ETX):
-            payloadFromMaster += [self.serial.read()]
             pos += 1
+            payloadFromMaster += [self.serial.read()]
 
-        # read FCC
+        pos += 1
         payloadFromMaster += [self.serial.read()]
-
-        payloadFromMaster = filter(None, payloadFromMaster)
-        print "payload from master:{}".format(repr(payloadFromMaster))
 
         return payloadFromMaster
 
@@ -299,77 +295,74 @@ class Instrument():
         if payloadFromMaster[pos] == chr(DLE):
             pos += 1
 
-        bytecount = ord(payloadFromMaster[pos])
+        bytecount = payloadFromMaster[pos]
         pos += 1
 
         if payloadFromMaster[pos] == chr(DLE):
             pos += 1
 
-        das = ord(payloadFromMaster[pos])
+        das = payloadFromMaster[pos]
         pos += 1
 
         if payloadFromMaster[pos] == chr(DLE):
             pos += 1
 
-        dae = ord(payloadFromMaster[pos])
+        dae = payloadFromMaster[pos]
         pos += 1
 
-        cw = ord(payloadFromMaster[pos])
+        cw = payloadFromMaster[pos]
+
+        if payloadFromMaster[pos] == chr(DLE):
+            pos += 1
+
+        sax = payloadFromMaster[pos]
         pos += 1
 
         if payloadFromMaster[pos] == chr(DLE):
             pos += 1
 
-        sax = ord(payloadFromMaster[pos])
-        pos += 1
-
-        if payloadFromMaster[pos] == chr(DLE):
-            pos += 1
-
-        sa = ord(payloadFromMaster[pos])
+        sa = payloadFromMaster[pos]
         pos += 1
 
         cmd = payloadFromMaster[pos]
+        pos += 1
 
         if cmd in (chr(STOP), chr(GET)):
-            pos += 3 
+            pos += 3
             fcc = payloadFromMaster[pos]    
-
         elif cmd == chr(SET):
             pos += 1
             if payloadFromMaster[pos] == chr(DLE):
                 pos += 1
 
             if ord(payloadFromMaster[pos]) != 255:
-                self.height = ord(payloadFromMaster[pos])
+                self.height = payloadFromMaster[pos]
             pos += 1
 
             if payloadFromMaster[pos] == chr(DLE):
                 pos += 1
 
             if ord(payloadFromMaster[pos]) != 255: 
-                self.angle = ord(payloadFromMaster[pos])
-            pos += 3 
+                self.angle = payloadFromMaster[pos]
+            pos += 3
 
             fcc = payloadFromMaster[pos] 
 
-        if cmd == chr(GET) and (self.slaveAddress == das and self.slaveAddress == dae):
+        if cmd == chr(GET) and (self.slaveAddress == das and self.slabveAddress == dae):
             cw = 0x00
-            self._sendResponse(cw)
+            _sendResponse(cw)
 
     def _sendResponse(self, cw):
         if cw == 0x00:
-            payloadToMaster = _checkEsc(self.sa) + _checkEsc(self.sa) + _checkEsc(cw)\
-                + chr(0x00) + _checkEsc(self.slaveAddress)\
-                + chr(GET) + _checkEsc(self.height) + _checkEsc(self.angle)\
+            payloadToMaster = checkEsc(self.sa) + checkEsc(self.sa) + checkEsc(cw) + chr(0xFF) \
+                + checkEsc(self.slaveAddress) \
+                + checkEsc(self.height) + checkEsc(self.angle) \
                 + chr(DLE) + chr(ETX)
 
         bc = len(payloadToMaster)
         payloadToMaster = chr(bc) + payloadToMaster
-        payloadToMaster += chr(_calculateFcc(payloadToMaster))
+        payloadToMaster += _calculateFcc(payloadToSlave)
         payloadToMaster = chr(DLE) + chr(STX) + payloadToMaster
-
-        print "Payload to master:{}".format(repr(payloadToMaster))
 
         self.serial.write(payloadToMaster)
             
@@ -417,22 +410,27 @@ class Instrument():
 	payloadToSlave = chr(DLE) + chr(STX) + payloadToSlave + chr(fcc)
 
         ## Communicate ##
-        payloadFromSlave = self._performCommand(payloadToSlave, cmd)
+        if cmd == GET:
+            needResp = True
+        else:
+            needResp = False
+        payloadFromSlave = self._performCommand(payloadToSlave, needResp)
 
         ## Check the contents in the response payload ##
         if cmd == GET:
-            return _checkResponse(payloadFromSlave)  # blind address, height and angle 
+            return self._checkResponse(payloadFromSlave)  # blind address, height and angle 
 
     ##########################################
     ## Communication implementation details ##
     ##########################################
 
 
-    def _performCommand(self, payloadToSlave, cmd):
+    def _performCommand(self, payloadToSlave, needResp=False):
         """Performs the command having the *functioncode*.
 
         Args:
             * payloadToSlave (str): Data to be transmitted to the slave 
+            * needResp (boolean): if True, response is required
 
         Returns:
             The extracted data payload from the slave (a string). It has been stripped of FCC etc.
@@ -447,20 +445,18 @@ class Instrument():
         """
 
         # Communicate
-        response = self._communicate(payloadToSlave, cmd)
+        response = self._communicate(payloadToSlave, needResp)
 
         # Extract payload
-        if cmd == GET:
-            payloadFromSlave = _extractPayload(response)
-            return payloadFromSlave
+        payloadFromSlave = _extractPayload(response)
+        return payloadFromSlave
 
 
-    def _communicate(self, request, cmd):
+    def _communicate(self, request, needResp=False):
         """Talk to the slave via a serial port.
 
         Args:
             request (str): The raw request that is to be sent to the slave.
-            cmd (str): Command that is to be sent to the slave.
 
         Returns:
             The raw data (string) returned from the slave.
@@ -557,34 +553,88 @@ class Instrument():
                 raise IOError(text)
 
         # Read response
-        # When only "GET" command is sent to the slave, the slave will return a response.
-        NUMBER_OF_BYTES_TO_READ = 20
-
-        if cmd == GET:
+        NUMBER_OF_BYTES_TO_READ = 50 
+        if needResp:
             answer = self.serial.read(NUMBER_OF_BYTES_TO_READ)
-            _LATEST_READ_TIMES[self.serial.port] = time.time()
+        else:
+            answer = chr(0x10) + chr(0x02) +\
+                     chr(0x0A) + chr(0x00) + chr(0x00) +\
+                     chr(0x00) + chr(0x00) + chr(0x00) +\
+                     chr(0x56) + chr(0x00) + chr(0x00) +\
+                     chr(0x10) + chr(0x03) + chr(0x7B)
 
-            if self.close_port_after_each_call:
-                self.serial.close()
+        _LATEST_READ_TIMES[self.serial.port] = time.time()
 
-            if sys.version_info[0] > 2:
-                answer = str(answer, encoding='latin1')  # Convert types to make it Python3 compatible
+        if self.close_port_after_each_call:
+            self.serial.close()
 
-            if self.debug:
-                template = 'Tacos2 debug mode. Response from instrument: {!r} ({}) ({} bytes), ' + \
-                    'roundtrip time: {:.1f} ms. Timeout setting: {:.1f} ms.\n'
-                text = template.format(
-                    answer,
-                    _hexlify(answer),
-                    len(answer),
-                    (_LATEST_READ_TIMES.get(self.serial.port, 0) - latest_write_time) * _SECONDS_TO_MILLISECONDS,
-                    self.serial.timeout * _SECONDS_TO_MILLISECONDS)
-                _print_out(text)
+        if sys.version_info[0] > 2:
+            answer = str(answer, encoding='latin1')  # Convert types to make it Python3 compatible
 
-            if len(answer) == 0:
-                raise IOError('No communication with the instrument (no answer)')
+        if self.debug:
+            template = 'Tacos2 debug mode. Response from instrument: {!r} ({}) ({} bytes), ' + \
+                'roundtrip time: {:.1f} ms. Timeout setting: {:.1f} ms.\n'
+            text = template.format(
+                answer,
+                _hexlify(answer),
+                len(answer),
+                (_LATEST_READ_TIMES.get(self.serial.port, 0) - latest_write_time) * _SECONDS_TO_MILLISECONDS,
+                self.serial.timeout * _SECONDS_TO_MILLISECONDS)
+            _print_out(text)
 
-            return answer
+        if len(answer) == 0:
+            raise IOError('No communication with the instrument (no answer)')
+
+        return answer
+
+
+    def _checkResponse(self, response):
+        """ check response 
+        """
+        pos = 0 
+
+        if response[pos] == chr(DLE):
+            pos += 1
+        bytecount = response[pos]
+        pos += 1
+
+        if response[pos] == chr(DLE):
+            pos += 1
+        das = response[pos]
+        pos += 1
+
+        if response[pos] == chr(DLE):
+            pos += 1
+        dae = response[pos]
+        pos += 1
+
+        cw = response[pos]
+        pos += 1
+
+        if response[pos] == chr(DLE):
+            pos += 1
+        sax = response[pos]
+        pos += 1
+
+        if response[pos] == chr(DLE):
+            pos += 1
+        sa = response[pos]
+        pos += 1
+
+        res = response[pos]
+        pos += 1
+
+        if response[pos] == chr(DLE):
+            pos += 1
+        self.height = ord(response[pos])
+        pos += 1
+
+        if response[pos] == chr(DLE):
+            pos += 1
+        self.angle = ord(response[pos])
+
+        return self.height, self.angle
+
 
 ####################
 # Payload handling #
@@ -607,7 +657,6 @@ def _extractPayload(response):
 
     """
     # extract bytecount and check it
-    print "response:{}".format(repr(response))
     pos = 2
     bytecount = ord(response[pos])
     pos += 1
@@ -1002,67 +1051,3 @@ def _calculateFcc(payload):
         sum += ord(payload[i])
 
     return (~sum + 1) & 0xFF
-
-
-def _checkResponse(response):
-    """ check response 
-    """
-    print "response:{}".format(repr(response))
-    pos = 0 
-
-    if response[pos] == chr(DLE):
-        pos += 1
-
-    bytecount = response[pos]
-    pos += 1
-
-    if response[pos] == chr(DLE):
-        pos += 1
-
-    das = response[pos]
-    pos += 1
-
-    if response[pos] == chr(DLE):
-        pos += 1
-
-    dae = response[pos]
-    pos += 1
-
-    cw = response[pos]
-    pos += 1
-
-    if response[pos] == chr(DLE):
-        pos += 1
-
-    sax = response[pos]
-    pos += 1
-
-    if response[pos] == chr(DLE):
-        pos += 1
-
-    sa = response[pos]
-    pos += 1
-
-    res = response[pos]
-    pos += 1
-
-    if res == chr(GET):
-        if response[pos] == chr(DLE):
-            pos += 1
-
-        if ord(response[pos]) != 255:
-            height = response[pos]
-            print "height:{}".format(ord(height))
-        pos += 1
-
-        if response[pos] == chr(DLE):
-            pos += 1
-
-        if ord(response[pos]) != 255:
-            angle = response[pos]
-            print "angle:{}".format(ord(angle))
-        pos += 2 
-
-        fcc = response[pos]
-
-    return height, angle 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-#   Copyright 2015 Jonas Berg
+#   Copyright 2017 Kazuhiro Matsuda
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -69,7 +69,7 @@ BYTESIZE = 8
 STOPBITS = 1
 """Default value for the number of stopbits (int)."""
 
-TIMEOUT  = 0.05
+TIMEOUT  = 0.1
 """Default value for the timeout value in seconds (float)."""
 
 CLOSE_PORT_AFTER_EACH_CALL = False
@@ -83,8 +83,8 @@ DLE = 0x10
 STX= 0x02
 ETX= 0x03
 STOP = 0x84
-READ = 0x8E
 SET = 0x8F
+GET = 0x55
 
 ##############################
 ## Tacos2 instrument object ##
@@ -131,6 +131,15 @@ class Instrument():
         self.sa = sourceaddress
         """source address (1 byte) """
 
+	self.height = 0;
+        """ blind hight from floor"""
+
+        self.angle = 0;
+        """ slat angle """
+
+        self.slaveAddress = 0x01
+        """ client address """
+
         self.debug = False
         """Set this to :const:`True` to print the communication details. Defaults to :const:`False`."""
 
@@ -173,8 +182,6 @@ class Instrument():
     ######################################
     ## Methods for talking to the slave ##
     ######################################
-
-
     def stop(self, das, dae):
         """stop Blind control.
 
@@ -193,7 +200,7 @@ class Instrument():
 
         """
 
-        cw = 0x0C
+        cw = 0xC0
 	cmd = STOP
 	_checkAddress(das, dae)
         return self._genericCommand(das, dae, cw, cmd)
@@ -214,13 +221,13 @@ class Instrument():
 
         """
 
-        cw = 0x0C
+        cw = 0xC0
 	cmd = SET 
         _checkAddress(das, dae)
         return self._genericCommand(das, dae, cw, cmd, height=height, angle=angle)
 
 
-    def read(self, das):
+    def get(self, das):
         """Read blind's height and slat angle.
 
         Args:
@@ -234,13 +241,138 @@ class Instrument():
 
         """
 
-        cw = 0x0C
-	cmd = READ
+        cw = 0x60
+	cmd = GET
 	dae = das
-        _checkAddress(das)
+        _checkAddress(das, dae)
         return self._genericCommand(das, dae, cw, cmd)
 
+    def setSlaveAddress(self, address):
+        """ set slave address """
 
+        if address > 0 or address <= 255:
+            self.slaveAddress = address
+        else:
+            raise ValueError(address)
+
+    def _receive(self):
+        """ receive payload from master and respond
+
+        Args:
+            None
+
+        Returns:
+            Received payload
+
+        Raises:
+            ValueError
+        """
+
+        payloadFromMaster = []
+        pos = 0
+
+        payloadFromMaster += [self.serial.read()]
+
+        while payloadFromMaster[pos] != chr(ETX):
+            payloadFromMaster += [self.serial.read()]
+            pos += 1
+
+        # read FCC
+        payloadFromMaster += [self.serial.read()]
+
+        payloadFromMaster = filter(None, payloadFromMaster)
+        print "payload from master:{}".format(repr(payloadFromMaster))
+
+        return payloadFromMaster
+
+    def respond(self):
+        """ analyze payload from master
+        Args:
+            None
+        Raises:
+            ValueError
+        """
+        payloadFromMaster = self._receive()
+
+        pos = 2
+
+        if payloadFromMaster[pos] == chr(DLE):
+            pos += 1
+
+        bytecount = ord(payloadFromMaster[pos])
+        pos += 1
+
+        if payloadFromMaster[pos] == chr(DLE):
+            pos += 1
+
+        das = ord(payloadFromMaster[pos])
+        pos += 1
+
+        if payloadFromMaster[pos] == chr(DLE):
+            pos += 1
+
+        dae = ord(payloadFromMaster[pos])
+        pos += 1
+
+        cw = ord(payloadFromMaster[pos])
+        pos += 1
+
+        if payloadFromMaster[pos] == chr(DLE):
+            pos += 1
+
+        sax = ord(payloadFromMaster[pos])
+        pos += 1
+
+        if payloadFromMaster[pos] == chr(DLE):
+            pos += 1
+
+        sa = ord(payloadFromMaster[pos])
+        pos += 1
+
+        cmd = payloadFromMaster[pos]
+
+        if cmd in (chr(STOP), chr(GET)):
+            pos += 3 
+            fcc = payloadFromMaster[pos]    
+
+        elif cmd == chr(SET):
+            pos += 1
+            if payloadFromMaster[pos] == chr(DLE):
+                pos += 1
+
+            if ord(payloadFromMaster[pos]) != 255:
+                self.height = ord(payloadFromMaster[pos])
+            pos += 1
+
+            if payloadFromMaster[pos] == chr(DLE):
+                pos += 1
+
+            if ord(payloadFromMaster[pos]) != 255: 
+                self.angle = ord(payloadFromMaster[pos])
+            pos += 3 
+
+            fcc = payloadFromMaster[pos] 
+
+        if cmd == chr(GET) and (self.slaveAddress == das and self.slaveAddress == dae):
+            cw = 0x00
+            self._sendResponse(cw)
+
+    def _sendResponse(self, cw):
+        if cw == 0x00:
+            payloadToMaster = _checkEsc(self.sa) + _checkEsc(self.sa) + _checkEsc(cw)\
+                + chr(0x00) + _checkEsc(self.slaveAddress)\
+                + chr(GET) + _checkEsc(self.height) + _checkEsc(self.angle)\
+                + chr(DLE) + chr(ETX)
+
+        bc = len(payloadToMaster)
+        payloadToMaster = chr(bc) + payloadToMaster
+        payloadToMaster += chr(_calculateFcc(payloadToMaster))
+        payloadToMaster = chr(DLE) + chr(STX) + payloadToMaster
+
+        print "Payload to master:{}".format(repr(payloadToMaster))
+
+        self.serial.write(payloadToMaster)
+            
     #####################
     ## Generic command ##
     #####################
@@ -257,7 +389,7 @@ class Instrument():
 
         Returns:
 	    * STOP: OK or NG
-	    * READ: blind address, height and angle.
+	    * GET: blind address, height and angle.
 	    * SET: OK or NG
 
         Raises:
@@ -266,13 +398,15 @@ class Instrument():
         """
 
         ## Build payload to slave ##
-        if cmd == STOP or cmd == READ:
-            payloadToSlave = _checkEsc(das) + _checkEsc(dae) + _checkEsc(cw) + _checkEsc(self.sax) + _checkEsc(self.sa) + \
-				chr(cmd) + chr(DLE) + chr(ETX)
+        if cmd in (STOP, GET):
+            payloadToSlave = _checkEsc(das) + _checkEsc(dae) + _checkEsc(cw) + \
+                             _checkEsc(self.sax) + _checkEsc(self.sa) + \
+		 	     chr(cmd) + chr(DLE) + chr(ETX)
 
         elif cmd == SET:
-	    payloadToSlave = _checkEsc(das) + _checkEsc(dae) + _checkEsc(cw) + _checkEsc(self.sax) + _checkEsc(self.sa) + \
-                                chr(cmd) + _checkEsc(height) + _checkEsc(angle) + chr(DLE) + chr(ETX)
+	    payloadToSlave = _checkEsc(das) + _checkEsc(dae) + _checkEsc(cw) + \
+                             _checkEsc(self.sax) + _checkEsc(self.sa) + \
+                             chr(cmd) + _checkEsc(height) + _checkEsc(angle) + chr(DLE) + chr(ETX)
 
 	bc = _checkEsc(len(payloadToSlave))
 
@@ -283,21 +417,18 @@ class Instrument():
 	payloadToSlave = chr(DLE) + chr(STX) + payloadToSlave + chr(fcc)
 
         ## Communicate ##
-        payloadFromSlave = self._performCommand(payloadToSlave)
+        payloadFromSlave = self._performCommand(payloadToSlave, cmd)
 
         ## Check the contents in the response payload ##
-        if cmd == STOP or cmd == SET:
-            return _checkResponse(payloadFromSlave)  # OK or NG 
-
-        if cmd == READ:
-            return _checkResponseRead(payloadFromSlave)  # blind address, height and angle 
+        if cmd == GET:
+            return _checkResponse(payloadFromSlave)  # blind address, height and angle 
 
     ##########################################
     ## Communication implementation details ##
     ##########################################
 
 
-    def _performCommand(self, payloadToSlave):
+    def _performCommand(self, payloadToSlave, cmd):
         """Performs the command having the *functioncode*.
 
         Args:
@@ -316,18 +447,20 @@ class Instrument():
         """
 
         # Communicate
-        response = self._communicate(payloadToSlave)
+        response = self._communicate(payloadToSlave, cmd)
 
         # Extract payload
-        payloadFromSlave = _extractPayload(response)
-        return payloadFromSlave
+        if cmd == GET:
+            payloadFromSlave = _extractPayload(response)
+            return payloadFromSlave
 
 
-    def _communicate(self, request):
+    def _communicate(self, request, cmd):
         """Talk to the slave via a serial port.
 
         Args:
             request (str): The raw request that is to be sent to the slave.
+            cmd (str): Command that is to be sent to the slave.
 
         Returns:
             The raw data (string) returned from the slave.
@@ -424,36 +557,34 @@ class Instrument():
                 raise IOError(text)
 
         # Read response
+        # When only "GET" command is sent to the slave, the slave will return a response.
         NUMBER_OF_BYTES_TO_READ = 20
-        answer = self.serial.read(NUMBER_OF_BYTES_TO_READ)
-        _LATEST_READ_TIMES[self.serial.port] = time.time()
 
-        if self.close_port_after_each_call:
-            self.serial.close()
+        if cmd == GET:
+            answer = self.serial.read(NUMBER_OF_BYTES_TO_READ)
+            _LATEST_READ_TIMES[self.serial.port] = time.time()
 
-        if sys.version_info[0] > 2:
-            answer = str(answer, encoding='latin1')  # Convert types to make it Python3 compatible
+            if self.close_port_after_each_call:
+                self.serial.close()
 
-        if self.debug:
-            template = 'Tacos2 debug mode. Response from instrument: {!r} ({}) ({} bytes), ' + \
-                'roundtrip time: {:.1f} ms. Timeout setting: {:.1f} ms.\n'
-            text = template.format(
-                answer,
-                _hexlify(answer),
-                len(answer),
-                (_LATEST_READ_TIMES.get(self.serial.port, 0) - latest_write_time) * _SECONDS_TO_MILLISECONDS,
-                self.serial.timeout * _SECONDS_TO_MILLISECONDS)
-            _print_out(text)
+            if sys.version_info[0] > 2:
+                answer = str(answer, encoding='latin1')  # Convert types to make it Python3 compatible
 
+            if self.debug:
+                template = 'Tacos2 debug mode. Response from instrument: {!r} ({}) ({} bytes), ' + \
+                    'roundtrip time: {:.1f} ms. Timeout setting: {:.1f} ms.\n'
+                text = template.format(
+                    answer,
+                    _hexlify(answer),
+                    len(answer),
+                    (_LATEST_READ_TIMES.get(self.serial.port, 0) - latest_write_time) * _SECONDS_TO_MILLISECONDS,
+                    self.serial.timeout * _SECONDS_TO_MILLISECONDS)
+                _print_out(text)
 
-####
-        answer = chr(DLE) + chr(STX) + chr(8) + chr(1) + chr(6) +chr(0x0C) + chr(0x00) + chr(0x00) + chr(0x8F) + chr(DLE) + chr(ETX) + chr(0x66)
-###
+            if len(answer) == 0:
+                raise IOError('No communication with the instrument (no answer)')
 
-        if len(answer) == 0:
-            raise IOError('No communication with the instrument (no answer)')
-
-        return answer
+            return answer
 
 ####################
 # Payload handling #
@@ -476,6 +607,7 @@ def _extractPayload(response):
 
     """
     # extract bytecount and check it
+    print "response:{}".format(repr(response))
     pos = 2
     bytecount = ord(response[pos])
     pos += 1
@@ -703,6 +835,80 @@ def _checkNumerical(inputvalue, minvalue=None, maxvalue=None, description='input
                 description, inputvalue, maxvalue))
 
 
+def _checkString(inputstring, description, minlength=0, maxlength=None):
+    """Check that the given string is valid.
+
+    Args:
+        * inputstring (string): The string to be checked
+        * description (string): Used in error messages for the checked inputstring
+        * minlength (int): Minimum length of the string
+        * maxlength (int or None): Maximum length of the string
+
+    Raises:
+        TypeError, ValueError
+
+    Uses the function :func:`_checkInt` internally.
+
+    """
+    # Type checking
+    if not isinstance(description, str):
+        raise TypeError('The description should be a string. Given: {0!r}'.format(description))
+
+    if not isinstance(inputstring, str):
+        raise TypeError('The {0} should be a string. Given: {1!r}'.format(description, inputstring))
+
+    if not isinstance(maxlength, (int, type(None))):
+        raise TypeError('The maxlength must be an integer or None. Given: {0!r}'.format(maxlength))
+
+    # Check values
+    _checkInt(minlength, minvalue=0, maxvalue=None, description='minlength')
+
+    if len(inputstring) < minlength:
+        raise ValueError('The {0} is too short: {1}, but minimum value is {2}. Given: {3!r}'.format( \
+            description, len(inputstring), minlength, inputstring))
+
+    if not maxlength is None:
+        if maxlength < 0:
+            raise ValueError('The maxlength must be positive. Given: {0}'.format(maxlength))
+
+        if maxlength < minlength:
+            raise ValueError('The maxlength must not be smaller than minlength. Given: {0} and {1}'.format( \
+                maxlength, minlength))
+
+        if len(inputstring) > maxlength:
+            raise ValueError('The {0} is too long: {1}, but maximum value is {2}. Given: {3!r}'.format( \
+                description, len(inputstring), maxlength, inputstring))
+
+def _checkInt(inputvalue, minvalue=None, maxvalue=None, description='inputvalue'):
+    """Check that the given integer is valid.
+
+    Args:
+        * inputvalue (int or long): The integer to be checked
+        * minvalue (int or long, or None): Minimum value of the integer
+        * maxvalue (int or long, or None): Maximum value of the integer
+        * description (string): Used in error messages for the checked inputvalue
+
+    Raises:
+        TypeError, ValueError
+
+    Note: Can not use the function :func:`_checkString`, as that function uses this function internally.
+
+    """
+    if not isinstance(description, str):
+        raise TypeError('The description should be a string. Given: {0!r}'.format(description))
+
+    if not isinstance(inputvalue, (int, long)):
+        raise TypeError('The {0} must be an integer. Given: {1!r}'.format(description, inputvalue))
+
+    if not isinstance(minvalue, (int, long, type(None))):
+        raise TypeError('The minvalue must be an integer or None. Given: {0!r}'.format(minvalue))
+
+    if not isinstance(maxvalue, (int, long, type(None))):
+        raise TypeError('The maxvalue must be an integer or None. Given: {0!r}'.format(maxvalue))
+
+    _checkNumerical(inputvalue, minvalue, maxvalue, description)
+
+
 #####################
 # Development tools #
 #####################
@@ -801,10 +1007,62 @@ def _calculateFcc(payload):
 def _checkResponse(response):
     """ check response 
     """
+    print "response:{}".format(repr(response))
+    pos = 0 
 
-    return True
+    if response[pos] == chr(DLE):
+        pos += 1
 
-def _checkResponseRead(response):
-    """ check response related to READ
-    """
-    return True
+    bytecount = response[pos]
+    pos += 1
+
+    if response[pos] == chr(DLE):
+        pos += 1
+
+    das = response[pos]
+    pos += 1
+
+    if response[pos] == chr(DLE):
+        pos += 1
+
+    dae = response[pos]
+    pos += 1
+
+    cw = response[pos]
+    pos += 1
+
+    if response[pos] == chr(DLE):
+        pos += 1
+
+    sax = response[pos]
+    pos += 1
+
+    if response[pos] == chr(DLE):
+        pos += 1
+
+    sa = response[pos]
+    pos += 1
+
+    res = response[pos]
+    pos += 1
+
+    if res == chr(GET):
+        if response[pos] == chr(DLE):
+            pos += 1
+
+        if ord(response[pos]) != 255:
+            height = response[pos]
+            print "height:{}".format(ord(height))
+        pos += 1
+
+        if response[pos] == chr(DLE):
+            pos += 1
+
+        if ord(response[pos]) != 255:
+            angle = response[pos]
+            print "angle:{}".format(ord(angle))
+        pos += 2 
+
+        fcc = response[pos]
+
+    return height, angle 

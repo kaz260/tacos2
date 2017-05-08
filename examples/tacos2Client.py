@@ -6,6 +6,7 @@ if __name__ == "__main__":
     instr = tacos2.Instrument("/dev/ttyUSB0")
     instr.debug = True
 
-    instr.setSlaveAddress(0x01)
-    instr.respond()
+    while True:
+        instr.setSlaveAddress(0x01)
+        instr.respond()
 
